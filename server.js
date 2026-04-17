@@ -8,6 +8,8 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const CLICKSIGN_TOKEN = process.env.CLICKSIGN_TOKEN || '';
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || '';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 
 app.use(express.json({ limit: '10mb' }));
 app.use(cors());
@@ -28,6 +30,44 @@ const LICENSE_INFO = {
   premium:   { title: 'LICENCA PREMIUM NAO-EXCLUSIVA',                   limits: 'Distribuicao limitada a 500.000 streams. Permitido redes sociais. Proibido publicidade paga.' },
   exclusive: { title: 'LICENCA EXCLUSIVA COM TRANSFERENCIA DE DIREITOS', limits: 'Uso ilimitado em todos os territorios. Inclui sincronizacao e publicidade comercial.' }
 };
+
+async function salvarLicencaDB(dados) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      produtor_email: dados.producerName || 'desconhecido',
+      beat_name: dados.beatName,
+      buyer_name: dados.buyerName,
+      buyer_cpf: dados.buyerCpf,
+      buyer_email: dados.buyerEmail,
+      license_type: dados.licenseType,
+      price: dados.price,
+      doc_id: dados.docId || null,
+      doc_key: dados.docKey || null
+    });
+    const url = new URL(SUPABASE_URL + '/rest/v1/licencas');
+    const opts = {
+      hostname: url.hostname,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        'apikey': SUPABASE_KEY,
+        'Authorization': 'Bearer ' + SUPABASE_KEY,
+        'Prefer': 'return=minimal'
+      }
+    };
+    const req = https.request(opts, r => {
+      let d = '';
+      r.on('data', c => d += c);
+      r.on('end', () => { console.log('Supabase:', r.statusCode); resolve(d); });
+    });
+    req.on('error', e => { console.error('Supabase erro:', e.message); resolve(null); });
+    req.write(body);
+    req.end();
+  });
+}
 
 function gerarPDFBuffer(d) {
   return new Promise((resolve, reject) => {
@@ -94,33 +134,6 @@ function gerarPDFBuffer(d) {
   });
 }
 
-function httpsPost(hostname, path, body, token) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify(body);
-    const opts = {
-      hostname,
-      path,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + token,
-        'Content-Length': Buffer.byteLength(payload)
-      }
-    };
-    const req = https.request(opts, res => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
-        catch (e) { resolve({ status: res.statusCode, body: data }); }
-      });
-    });
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
-  });
-}
-
 function clicksignAPI(method, path, body) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : '';
@@ -129,10 +142,7 @@ function clicksignAPI(method, path, body) {
       hostname: 'app.clicksign.com',
       path: fullPath,
       method,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload)
-      }
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
     };
     const req = https.request(opts, res => {
       let data = '';
@@ -148,116 +158,6 @@ function clicksignAPI(method, path, body) {
   });
 }
 
-// CAMADA 4: Mercado Pago - cria link de pagamento
-app.post('/criar-pagamento', async (req, res) => {
-  const { buyerName, buyerEmail, beatName, licenseType, price: priceRaw } = req.body;
-  const price = parseFloat(priceRaw);
-  if (!buyerName || !buyerEmail || !beatName || !licenseType || isNaN(price) || price <= 0) {
-    return res.status(400).json({ erro: 'Dados incompletos.' });
-  }
-  const tier = getTier(price);
-  const fee  = price * tier.rate;
-  try {
-    const mp = await httpsPost('api.mercadopago.com', '/checkout/preferences', {
-      items: [{
-        title: 'Licenca de beat: ' + beatName + ' (' + LICENSE_INFO[licenseType].title + ')',
-        quantity: 1,
-        unit_price: price,
-        currency_id: 'BRL'
-      }],
-      payer: { name: buyerName, email: buyerEmail },
-      external_reference: JSON.stringify({ buyerName, buyerEmail, beatName, licenseType, price }),
-      back_urls: {
-        success: 'https://beatlicense-backend-production.up.railway.app/pagamento/sucesso',
-        failure: 'https://beatlicense-backend-production.up.railway.app/pagamento/falha',
-        pending: 'https://beatlicense-backend-production.up.railway.app/pagamento/pendente'
-      },
-      auto_return: 'approved',
-      notification_url: 'https://beatlicense-backend-production.up.railway.app/webhook/mercadopago',
-      statement_descriptor: 'BEATLICENSE',
-      payment_methods: { excluded_payment_types: [], installments: 1 }
-    }, MP_ACCESS_TOKEN);
-
-    if (!mp.body.id) {
-      console.error('MP erro:', JSON.stringify(mp.body));
-      return res.status(500).json({ erro: 'Erro ao criar pagamento. Configure MP_ACCESS_TOKEN.' });
-    }
-    res.json({
-      sucesso: true,
-      link: mp.body.init_point,
-      linkSandbox: mp.body.sandbox_init_point,
-      preferenceId: mp.body.id,
-      taxa: fmtBRL(fee),
-      repasse: fmtBRL(price - fee)
-    });
-  } catch (err) {
-    res.status(500).json({ erro: err.message });
-  }
-});
-
-// Webhook do Mercado Pago - dispara apos pagamento aprovado
-app.post('/webhook/mercadopago', async (req, res) => {
-  res.json({ ok: true });
-  const { type, data } = req.body;
-  if (type !== 'payment' || !data || !data.id) return;
-  try {
-    const paymentInfo = await new Promise((resolve, reject) => {
-      const opts = {
-        hostname: 'api.mercadopago.com',
-        path: '/v1/payments/' + data.id,
-        method: 'GET',
-        headers: { 'Authorization': 'Bearer ' + MP_ACCESS_TOKEN }
-      };
-      const req2 = https.request(opts, r => {
-        let d = '';
-        r.on('data', c => d += c);
-        r.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-      });
-      req2.on('error', reject);
-      req2.end();
-    });
-
-    if (paymentInfo.status !== 'approved') return;
-
-    const ext = JSON.parse(paymentInfo.external_reference);
-    const { buyerName, buyerEmail, buyerCpf = '000.000.000-00', beatName, licenseType, price, producerName = 'Prod. H\u2019erick' } = ext;
-
-    const { buffer, docId } = await gerarPDFBuffer({ buyerName, buyerCpf, buyerEmail, beatName, producerName, licenseType, price: parseFloat(price) });
-
-    if (!CLICKSIGN_TOKEN) {
-      console.log('Pagamento aprovado mas CLICKSIGN_TOKEN nao configurado. Doc:', docId);
-      return;
-    }
-
-    const b64 = buffer.toString('base64');
-    const upload = await clicksignAPI('POST', '/api/v1/documents', {
-      document: {
-        path: '/licencas/' + docId + '.pdf',
-        content_base64: 'data:application/pdf;base64,' + b64,
-        auto_close: true,
-        locale: 'pt-BR',
-        remind_interval: 3
-      }
-    });
-
-    if (!upload.body.document) { console.error('ClickSign erro:', JSON.stringify(upload.body)); return; }
-
-    const docKey = upload.body.document.key;
-    await clicksignAPI('POST', '/api/v1/lists', {
-      list: {
-        document_key: docKey,
-        signer: { email: buyerEmail, auths: ['email'], name: buyerName, documentation: buyerCpf.replace(/\D/g, '') },
-        sign_as: 'contractor'
-      }
-    });
-    await clicksignAPI('POST', '/api/v1/notifications', { document_key: docKey });
-    console.log('Licenca enviada para assinatura:', docId, buyerEmail);
-  } catch (err) {
-    console.error('Webhook MP erro:', err.message);
-  }
-});
-
-// CAMADA 3: Gerar licenca manualmente (sem pagamento - uso interno)
 app.post('/gerar-licenca', async (req, res) => {
   const { buyerName, buyerCpf, buyerEmail, beatName, producerName, licenseType, price: priceRaw } = req.body;
   for (const [f, v] of Object.entries({ buyerName, buyerCpf, buyerEmail, beatName, producerName, licenseType })) {
@@ -266,28 +166,35 @@ app.post('/gerar-licenca', async (req, res) => {
   const price = parseFloat(priceRaw);
   if (isNaN(price) || price <= 0) return res.status(400).json({ erro: 'Valor invalido.' });
   if (!LICENSE_INFO[licenseType]) return res.status(400).json({ erro: 'Tipo invalido.' });
+
   try {
     const { buffer, docId } = await gerarPDFBuffer({ buyerName, buyerCpf, buyerEmail, beatName, producerName, licenseType, price });
-    if (!CLICKSIGN_TOKEN) {
+
+    let docKey = null;
+
+    if (CLICKSIGN_TOKEN) {
+      const b64 = buffer.toString('base64');
+      const upload = await clicksignAPI('POST', '/api/v1/documents', {
+        document: { path: '/licencas/' + docId + '.pdf', content_base64: 'data:application/pdf;base64,' + b64, auto_close: true, locale: 'pt-BR', remind_interval: 3 }
+      });
+      if (upload.body.document) {
+        docKey = upload.body.document.key;
+        await clicksignAPI('POST', '/api/v1/lists', {
+          list: { document_key: docKey, signer: { email: buyerEmail, auths: ['email'], name: buyerName, documentation: buyerCpf.replace(/\D/g, '') }, sign_as: 'contractor' }
+        });
+        await clicksignAPI('POST', '/api/v1/notifications', { document_key: docKey });
+      }
+    }
+
+    await salvarLicencaDB({ buyerName, buyerCpf, buyerEmail, beatName, producerName, licenseType, price, docId, docKey });
+
+    if (CLICKSIGN_TOKEN && docKey) {
+      res.json({ sucesso: true, mensagem: 'Licenca enviada para ' + buyerEmail + ' via ClickSign!', docId, docKey });
+    } else {
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="Licenca-' + docId + '.pdf"');
-      return res.send(buffer);
+      res.send(buffer);
     }
-    const b64 = buffer.toString('base64');
-    const upload = await clicksignAPI('POST', '/api/v1/documents', {
-      document: { path: '/licencas/' + docId + '.pdf', content_base64: 'data:application/pdf;base64,' + b64, auto_close: true, locale: 'pt-BR', remind_interval: 3 }
-    });
-    if (!upload.body.document) {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename="Licenca-' + docId + '.pdf"');
-      return res.send(buffer);
-    }
-    const docKey = upload.body.document.key;
-    await clicksignAPI('POST', '/api/v1/lists', {
-      list: { document_key: docKey, signer: { email: buyerEmail, auths: ['email'], name: buyerName, documentation: buyerCpf.replace(/\D/g, '') }, sign_as: 'contractor' }
-    });
-    await clicksignAPI('POST', '/api/v1/notifications', { document_key: docKey });
-    res.json({ sucesso: true, mensagem: 'Licenca enviada para ' + buyerEmail + ' via ClickSign!', docId, docKey });
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
@@ -298,6 +205,32 @@ app.post('/webhook/clicksign', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/ping', (req, res) => res.json({ status: 'ok', message: 'BeatLicense Camada 4 online - PDF + ClickSign + MercadoPago!' }));
+app.get('/historico/:email', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.json([]);
+  const email = req.params.email;
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const path = '/rest/v1/licencas?produtor_email=eq.' + encodeURIComponent(email) + '&order=created_at.desc&limit=100';
+      const opts = {
+        hostname: new URL(SUPABASE_URL).hostname,
+        path,
+        method: 'GET',
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY }
+      };
+      const req2 = https.request(opts, r => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve([]); } });
+      });
+      req2.on('error', reject);
+      req2.end();
+    });
+    res.json(result);
+  } catch(e) {
+    res.json([]);
+  }
+});
+
+app.get('/ping', (req, res) => res.json({ status: 'ok', message: 'BeatLicense v5 - PDF + ClickSign + Supabase!' }));
 
 app.listen(PORT, () => console.log('BeatLicense rodando na porta ' + PORT));
