@@ -156,15 +156,26 @@ app.post('/gerar-licenca',async(req,res)=>{
     if(CLICKSIGN_TOKEN){
       const b64=buffer.toString('base64');
       console.log('ClickSign: enviando documento para',buyerEmail);
+      // 1. Cria o documento
       const up=await clicksignAPI('POST','/api/v1/documents',{document:{path:'/licencas/'+docId+'.pdf',content_base64:'data:application/pdf;base64,'+b64,auto_close:true,locale:'pt-BR',remind_interval:3}});
-      console.log('ClickSign doc response status:',up.status,'body:',JSON.stringify(up.body).slice(0,300));
+      console.log('ClickSign doc status:',up.status,'key:',up.body.document&&up.body.document.key);
       if(up.body.document){
         docKey=up.body.document.key;
-        console.log('ClickSign docKey:',docKey);
-        const listResp=await clicksignAPI('POST','/api/v1/lists',{list:{document_key:docKey,signer:{email:buyerEmail,auths:['email'],name:buyerName,documentation:buyerCpf.replace(/\D/g,'')},sign_as:'contractor'}});
-        console.log('ClickSign list response:',JSON.stringify(listResp.body).slice(0,200));
-        const notifResp=await clicksignAPI('POST','/api/v1/notifications',{document_key:docKey});
-        console.log('ClickSign notif response:',JSON.stringify(notifResp.body).slice(0,200));
+        // 2. Cria o signatário
+        const cpfLimpo=buyerCpf.replace(/\D/g,'');
+        const signerResp=await clicksignAPI('POST','/api/v1/signers',{signer:{email:buyerEmail,auths:['email'],name:buyerName,documentation:cpfLimpo,has_documentation:cpfLimpo.length===11}});
+        console.log('ClickSign signer status:',signerResp.status,'body:',JSON.stringify(signerResp.body).slice(0,200));
+        const signerKey=signerResp.body.signer&&signerResp.body.signer.key;
+        if(signerKey){
+          // 3. Adiciona o signatário ao documento
+          const listResp=await clicksignAPI('POST','/api/v1/lists',{list:{document_key:docKey,signer_key:signerKey,sign_as:'contractee'}});
+          console.log('ClickSign list status:',listResp.status,'body:',JSON.stringify(listResp.body).slice(0,200));
+          // 4. Envia notificação por email
+          const notifResp=await clicksignAPI('POST','/api/v1/notifications',{message:{key:docKey}});
+          console.log('ClickSign notif status:',notifResp.status,'body:',JSON.stringify(notifResp.body).slice(0,200));
+        } else {
+          console.error('ClickSign ERRO ao criar signer:',JSON.stringify(signerResp.body));
+        }
       } else {
         console.error('ClickSign ERRO ao criar documento:',JSON.stringify(up.body));
       }
