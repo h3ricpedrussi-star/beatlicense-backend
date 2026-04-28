@@ -155,11 +155,18 @@ app.post('/gerar-licenca',async(req,res)=>{
     let docKey=null;
     if(CLICKSIGN_TOKEN){
       const b64=buffer.toString('base64');
+      console.log('ClickSign: enviando documento para',buyerEmail);
       const up=await clicksignAPI('POST','/api/v1/documents',{document:{path:'/licencas/'+docId+'.pdf',content_base64:'data:application/pdf;base64,'+b64,auto_close:true,locale:'pt-BR',remind_interval:3}});
+      console.log('ClickSign doc response status:',up.status,'body:',JSON.stringify(up.body).slice(0,300));
       if(up.body.document){
         docKey=up.body.document.key;
-        await clicksignAPI('POST','/api/v1/lists',{list:{document_key:docKey,signer:{email:buyerEmail,auths:['email'],name:buyerName,documentation:buyerCpf.replace(/\D/g,'')},sign_as:'contractor'}});
-        await clicksignAPI('POST','/api/v1/notifications',{document_key:docKey});
+        console.log('ClickSign docKey:',docKey);
+        const listResp=await clicksignAPI('POST','/api/v1/lists',{list:{document_key:docKey,signer:{email:buyerEmail,auths:['email'],name:buyerName,documentation:buyerCpf.replace(/\D/g,'')},sign_as:'contractor'}});
+        console.log('ClickSign list response:',JSON.stringify(listResp.body).slice(0,200));
+        const notifResp=await clicksignAPI('POST','/api/v1/notifications',{document_key:docKey});
+        console.log('ClickSign notif response:',JSON.stringify(notifResp.body).slice(0,200));
+      } else {
+        console.error('ClickSign ERRO ao criar documento:',JSON.stringify(up.body));
       }
     }
     await salvarLicencaDB({buyerName,buyerCpf,buyerEmail,beatName,producerName,licenseType,price,docId,docKey});
