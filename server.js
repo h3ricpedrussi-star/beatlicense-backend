@@ -163,8 +163,12 @@ app.post('/gerar-licenca',async(req,res)=>{
       }
     }
     await salvarLicencaDB({buyerName,buyerCpf,buyerEmail,beatName,producerName,licenseType,price,docId,docKey});
-    if(CLICKSIGN_TOKEN&&docKey){res.json({sucesso:true,mensagem:'Licenca enviada para '+buyerEmail+' via ClickSign!',docId,docKey});}
-    else{res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition','attachment; filename="Licenca-'+docId+'.pdf"');res.send(buffer);}
+    if(CLICKSIGN_TOKEN&&docKey){
+      res.json({sucesso:true,mensagem:'Licenca enviada para '+buyerEmail+' via ClickSign!',docId,docKey});
+    } else {
+      const pdfBase64=buffer.toString('base64');
+      res.json({sucesso:true,mensagem:'Licenca gerada com sucesso!',docId,pdfBase64,clicksign:false});
+    }
   }catch(err){res.status(500).json({erro:err.message});}
 });
 
