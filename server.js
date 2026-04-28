@@ -171,7 +171,8 @@ app.post('/gerar-licenca',async(req,res)=>{
           const listResp=await clicksignAPI('POST','/api/v1/lists',{list:{document_key:docKey,signer_key:signerKey,sign_as:'contractee'}});
           console.log('ClickSign list status:',listResp.status,'body:',JSON.stringify(listResp.body).slice(0,200));
           // 4. Envia notificação por email
-          const notifResp=await clicksignAPI('POST','/api/v1/notifications',{message:{key:docKey}});
+          const reqSigKey=listResp.body&&listResp.body.list&&listResp.body.list.request_signature_key;
+          const notifResp=await clicksignAPI('POST','/api/v1/notifications',{message:{key:reqSigKey||docKey}});
           console.log('ClickSign notif status:',notifResp.status,'body:',JSON.stringify(notifResp.body).slice(0,200));
         } else {
           console.error('ClickSign ERRO ao criar signer:',JSON.stringify(signerResp.body));
